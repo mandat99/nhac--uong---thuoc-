@@ -1,0 +1,223 @@
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
+  runApp(MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Nhắc Uống Thuốc',
+      home: HomeScreen(),
+      debugShowCheckedModeBanner: false,
+    );
+  }
+}
+
+class HomeScreen extends StatefulWidget {
+  @override
+  _HomeScreenState createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  List<Map<String, dynamic>> medicineReminders = [];
+  FlutterTts tts = FlutterTts();
+
+  Future<void> _speakReminder(String name, String dose) async {
+    await tts.setLanguage('vi-VN');
+    await tts.setVoice({'name': 'vi-vn-x-ggf-network', 'locale': 'vi-VN'});
+    await tts.setSpeechRate(0.5);
+    await tts.setPitch(1.0);
+    await tts.speak('Tới giờ uống thuốc rồi. $dose thuốc $name bạn nhé!');
+  }
+
+  Future<void> _scheduleNotification(String name, String dose, Time time) async {
+    // Placeholder: Bạn có thể tích hợp `flutter_local_notifications` tại đây
+    // và gọi _speakReminder tại thời điểm đã lên lịch nếu dùng background service.
+    await _speakReminder(name, dose);
+  }
+
+  String _encryptText(String text) => text; // Placeholder mã hóa
+
+  Future<void> _pickAndRecognizeText() async {
+    final picker = ImagePicker();
+    final pickedFile = await picker.pickImage(source: ImageSource.camera);
+
+    if (pickedFile != null) {
+      final inputImage = InputImage.fromFile(File(pickedFile.path));
+      final textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
+      final recognizedText = await textRecognizer.processImage(inputImage);
+
+      bool hasMatchFound = false;
+
+      for (var block in recognizedText.blocks) {
+        for (var line in block.lines) {
+          String text = line.text.toLowerCase();
+          print(text);
+
+          final RegExp regex = RegExp(
+            r'(?:(?:uống)?\s*(\d+)\s*viên\s*(?:thuốc)?\s*([\w\s]+)?\s*lúc\s*(\d{1,2}:\d{2}))|(?:([\w\s]+)\s*(\d+)\s*viên\s*(\d{1,2}:\d{2}))',
+            caseSensitive: false,
+          );
+          final match = regex.firstMatch(text);
+          if (match != null) {
+            hasMatchFound = true;
+            String name = '', dose = '', timeStr = '';
+            if (match.group(1) != null) {
+              dose = '${match.group(1)} viên';
+              name = match.group(2)?.trim() ?? 'thuốc không rõ';
+              timeStr = match.group(3) ?? '07:00';
+            } else {
+              name = match.group(4)?.trim() ?? 'thuốc không rõ';
+              dose = '${match.group(5)} viên';
+              timeStr = match.group(6) ?? '07:00';
+            }
+
+            final confirmed = await showDialog<bool>(
+              context: context,
+              builder: (context) {
+                return AlertDialog(
+                  title: Text('Xác nhận thuốc'),
+                  content: Text('Tên: $name\nLiều dùng: $dose\nGiờ uống: $timeStr'),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(context, false), child: Text('Hủy')),
+                    TextButton(onPressed: () => Navigator.pop(context, true), child: Text('Xác nhận')),
+                  ],
+                );
+              },
+            );
+
+            if (confirmed != true) continue;
+
+            final parts = timeStr.split(':');
+            final hour = int.parse(parts[0]);
+            final minute = int.parse(parts[1]);
+
+            setState(() {
+              medicineReminders.add({'name': name, 'dose': dose, 'time': timeStr});
+            });
+
+            await _scheduleNotification(name, dose, Time(hour, minute));
+            await FirebaseFirestore.instance.collection('medicines').add({
+              'name': _encryptText(name),
+              'dose': _encryptText(dose),
+              'time': _encryptText(timeStr),
+              'timestamp': FieldValue.serverTimestamp(),
+            });
+          }
+        }
+      }
+
+      if (!hasMatchFound) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Không tìm thấy thông tin thuốc hợp lệ.')));
+      }
+
+      await textRecognizer.close();
+    }
+  }
+
+  void _showAddMedicineDialog() {
+    final nameController = TextEditingController();
+    final doseController = TextEditingController();
+    TimeOfDay selectedTime = TimeOfDay(hour: 7, minute: 0);
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('Thêm thuốc mới'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: nameController, decoration: InputDecoration(labelText: 'Tên thuốc')),
+              TextField(controller: doseController, decoration: InputDecoration(labelText: 'Liều dùng')),
+              SizedBox(height: 10),
+              TextButton(
+                onPressed: () async {
+                  TimeOfDay? time = await showTimePicker(context: context, initialTime: selectedTime);
+                  if (time != null) selectedTime = time;
+                },
+                child: Text('Chọn giờ uống'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                final name = nameController.text.trim();
+                final dose = doseController.text.trim();
+                final timeString = '${selectedTime.hour}:${selectedTime.minute.toString().padLeft(2, '0')}';
+
+                if (name.isNotEmpty && dose.isNotEmpty) {
+                  setState(() {
+                    medicineReminders.add({'name': name, 'dose': dose, 'time': timeString});
+                  });
+
+                  await _scheduleNotification(name, dose, Time(selectedTime.hour, selectedTime.minute));
+                  await FirebaseFirestore.instance.collection('medicines').add({
+                    'name': _encryptText(name),
+                    'dose': _encryptText(dose),
+                    'time': _encryptText(timeString),
+                    'timestamp': FieldValue.serverTimestamp(),
+                  });
+
+                  Navigator.of(context).pop();
+                }
+              },
+              child: Text('Lưu'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Hủy'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('Nhắc Uống Thuốc')),
+      body: Column(
+        children: [
+          ElevatedButton(
+            onPressed: _pickAndRecognizeText,
+            child: Text('Quét Toa Thuốc'),
+          ),
+          ElevatedButton(
+            onPressed: _showAddMedicineDialog,
+            child: Text('Thêm thuốc thủ công'),
+          ),
+          Expanded(
+            child: ListView.builder(
+              itemCount: medicineReminders.length,
+              itemBuilder: (context, index) {
+                final item = medicineReminders[index];
+                return ListTile(
+                  title: Text('${item['name']} - ${item['dose']}'),
+                  subtitle: Text('Giờ uống: ${item['time']}'),
+                  trailing: IconButton(
+                    icon: Icon(Icons.delete),
+                    onPressed: () => setState(() => medicineReminders.removeAt(index)),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
