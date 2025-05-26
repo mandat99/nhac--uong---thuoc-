@@ -1,0 +1,28 @@
+workflows:
+  build-android-apk:
+    name: Build Android APK
+    max_build_duration: 15
+    environment:
+      flutter: stable
+      xcode: latest
+      vars:
+        BUILD_NAME: "1.0.0"
+        BUILD_NUMBER: "1"
+    scripts:
+      - name: Get dependencies
+        script: |
+          flutter pub get
+      - name: Build APK
+        script: |
+          flutter build apk --release \
+            --build-name=$BUILD_NAME \
+            --build-number=$BUILD_NUMBER
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
+    publishing:
+      email:
+        recipients:
+          - ngocmalanh9@gmail.com
+        notify:
+          success: true
+          failure: true
